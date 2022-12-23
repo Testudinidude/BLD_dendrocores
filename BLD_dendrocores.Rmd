@@ -1,0 +1,255 @@
+---
+title: "Beech Leaf Disease and Dendro-cores"
+author: "Nathan Byer, Connie Hausman, Katie Flinn"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    fig_width: 6
+    fig_height: 4
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,out.width = "100%")
+
+options(width=1200)
+
+
+detachAllPackages <- function() {
+  basic.packages.blank <- c(    
+    "stats",    
+    "graphics",    
+    "grDevices",    
+    "utils",   
+    "datasets",  
+    "methods",    
+    "base"    
+  )    
+  basic.packages <- paste("package:", basic.packages.blank, sep = "")   
+  package.list <- search()[ifelse(unlist(gregexpr("package:", search())) == 1, TRUE, FALSE)]   
+  package.list <- setdiff(package.list, basic.packages)   
+  if (length(package.list) > 0) {   
+    for (package in package.list) {   
+      detach(package, character.only = TRUE)   
+    }   
+  }    
+}
+
+detachAllPackages()
+library(ggplot2)
+library(dotwhisker)
+library(dplyr)
+library(tidyverse)
+library(vegan)
+library(caret)
+library(lubridate)
+library(spOccupancy)
+library(vegan)
+library(raster)
+library(dismo)
+library(terra)
+library(sp)
+library(rgdal)
+library(gstat)
+library(broom)
+library(shiny)
+library(sp)
+library(ggplot2)
+library(RColorBrewer)
+library(rgdal)
+library(broom)
+library(AICcmodavg)
+library(indicspecies)
+library(lme4)
+library(MASS)
+library(cooccur)
+library(igraph)
+library(visNetwork)
+library(lubridate)
+library(performance)
+library(glmmTMB)
+```
+
+# Reading in the tree ring data
+
+```{r}
+beech<-read.csv("beech_master.csv",header=T)
+
+hemlock<-read.csv("hemlock_master.csv",header=T)
+
+maple<-read.csv("maple_master.csv",header=T)
+
+
+```
+
+# Reading in BLD data
+
+```{r}
+bld_data<-read.csv("2022_BWU_Flinn_tree_rings_BLD_datarequest.csv",header=T)
+```
+
+# Merging all three, and adding a key for tree species
+
+```{r}
+beech_transpose<-beech %>%
+  pivot_longer(cols = ABW.101A:ABW.301A,names_to = "Tree") %>%
+  add_column(Species="F. grandifolia") 
+
+hemlock_transpose<-hemlock %>%
+  pivot_longer(cols = ABW.201A:ABW.300B,names_to = "Tree") %>%
+  add_column(Species="T. canadensis")
+
+maple_transpose<-maple %>%
+  pivot_longer(cols = ABW.100A:ABW.9B.1,names_to = "Tree") %>%
+  add_column(Species="A. spp.")
+
+alltrees<-rbind(beech_transpose,hemlock_transpose,maple_transpose)
+
+p<-ggplot(aes(x=Year,y=value,col=Species),data=alltrees)+geom_point()+geom_smooth()+ylim(c(0,20))
+p
+
+p2<-ggplot(aes(x=Year,y=value,col=Species),data=alltrees)+stat_summary(geom = "line")+ylim(c(0,20))
+p2
+
+p3<-ggplot(aes(x=Year,y=value,col=Species),data=alltrees)+stat_summary(geom = "line")+ylim(c(0,20))+xlim(c(2000,2019))
+p3
+
+```
+
+## create periods for pre- during - post
+
+```{r}
+alltrees$BLDperiod<-as.numeric(alltrees$Year)
+
+alltrees$BLDperiod[alltrees$BLDperiod < 2012]<- "before"
+
+alltrees$BLDperiod[alltrees$BLDperiod != "before"]<- "after"
+
+
+```
+
+## models of species x period
+
+```{r}
+
+
+alltrees$BLDperiod<-factor(alltrees$BLDperiod,levels=c("before","after"))
+alltrees$Species<-factor(alltrees$Species,levels=c("F. grandifolia","A. spp.","T. canadensis"))
+
+growthmod<-glmmTMB(value ~ BLDperiod*Species+
+                           (1|Tree), 
+                       data = alltrees)
+
+summary(growthmod)
+
+```
+
+So this suggests that beech trees typically grow more slowly than maples, and faster than hemlocks. However, for the post-BLD period, beech trees have actually *increased* in growth rates overall, and now appear to be dramatically faster growing relative to maples and hemlocks (based on the significant, negative interaction terms). 
+
+1. pull in BLD prevalence
+2. explore beech-specific associations between growth rates and BLD 
+3. compare growth rates for BLD-infected beeches to non-beech trees
+
+
+#  
+
+```{r}
+
+treename<-gsub("ABW.", "", beech_transpose$Tree)
+treename<-gsub("A", "", treename)
+treename<-gsub("B", "", treename)
+
+beech_transpose$tree_id<-as.numeric(treename)
+
+beech_transpose$treeyear<-paste0(beech_transpose$tree_id,"_",beech_transpose$Year)
+
+bld_data$Year<-year(as.Date(bld_data$date,format = "%m/%d/%Y"))
+bld_data$treeyear<-paste0(bld_data$tree_id,"_",bld_data$Year)
+
+bld_data_symptomdata<-bld_data[,c(2,10:21,23:25)]
+
+bld_data_symptomdata_naomit<-na.omit(bld_data_symptomdata)
+
+cols<-seq(2,16,1)
+
+bld_data_symptomdata[,cols] = apply(bld_data_symptomdata[,cols], 2, function(x) as.numeric(as.factor(x)))
+
+bld_data_symptomdata_2<-column_to_rownames(bld_data_symptomdata,var = "tree_id")
+
+bldrda<-rda(bld_data_symptomdata_2)
+
+scores(bldrda,display = "species")
+
+
+# PC1 captures a sick (negative) to healthy (positive) gradient
+# will just use PC1 scores for each tree
+
+bld_data$PC1<-scores(bldrda,display="sites")[,1]
+
+bld_data$relhealth<-bld_data$PC1
+
+bld_data$relhealth[bld_data$relhealth < 0]<- "unhealthy"
+
+bld_data$relhealth[bld_data$relhealth != "unhealthy"]<- "healthy"
+
+beech_transpose_2 <- beech_transpose %>%
+  group_by(tree_id,treeyear,Year) %>%
+  summarise(growthincrement=value) %>%
+  left_join(bld_data,by="treeyear") 
+
+beech_transpose_3<-beech_transpose_2[beech_transpose_2$Year.x %in% c(seq(2000,2021,1)),]
+
+
+beech_transpose_3$BLDperiod<-as.numeric(beech_transpose_3$Year.x)
+
+beech_transpose_3$BLDperiod[beech_transpose_3$BLDperiod < 2012]<- "before"
+
+beech_transpose_3$BLDperiod[beech_transpose_3$BLDperiod != "before"]<- "after"
+
+
+bld_data_health<-bld_data %>%
+  dplyr::select(tree_id,relhealth,PC1)
+bld_data_health$tree_id.x<-bld_data_health$tree_id
+
+beech_transpose_4<- beech_transpose_3 %>%
+  group_by(tree_id.x,Year.x,BLDperiod) %>%
+  summarise(
+            averagegrowth=mean(growthincrement)) %>%
+  drop_na() %>%
+  left_join(bld_data_health,by="tree_id.x")
+
+```
+
+
+```{r}
+beech_transpose_4
+growthhealthmod<-glmmTMB(averagegrowth ~ PC1*BLDperiod+
+                           (1|tree_id.x), 
+                       data = beech_transpose_4)
+
+summary(growthhealthmod)
+```
+
+```{r}
+beech_transpose_5<- beech_transpose_3 %>%
+  group_by(tree_id.x) %>%
+  summarise(
+            averagegrowth=mean(growthincrement)) %>%
+  drop_na() %>%
+  left_join(bld_data_health,by="tree_id.x")
+
+growthhealth_end<-glm(averagegrowth ~ PC1,
+                       data = beech_transpose_5)
+
+p<-ggplot(aes(x=PC1,y=averagegrowth),data=beech_transpose_5)+geom_point()+geom_smooth(method="lm")+xlab("PC-based BLD health score (negative = more symptoms)") + ylab("average growth rate (cm, 2000-2021)")
+p
+```
+
